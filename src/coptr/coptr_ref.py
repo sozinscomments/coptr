@@ -3,6 +3,8 @@ coptr_ref.py
 ======================
 Estimate peak-to-trough ratios using complete reference genomes.
 """
+import sys
+
 
 """
 This file is part of CoPTR.
@@ -26,8 +28,6 @@ import math
 import multiprocessing as mp
 import os.path
 import pickle as pkl
-import struct
-import sys
 
 import numpy as np
 import scipy.optimize
@@ -35,6 +35,12 @@ import scipy.stats
 
 
 logger = logging.getLogger(__name__)
+
+
+#SEANS ADDITION!!!!!!!!!!!!!!!!!
+with open('shared_dict_ref.pkl','wb') as file:
+    #add an empty dictionary to clear the info
+    pkl.dump({},file)
 
 
 class QCResult:
@@ -542,6 +548,10 @@ class CoPTRRefEstimate:
         self.nreads = nreads
         self.cov_frac = cov_frac
 
+        #SEANS ADDITION!!!
+        with open('shared_dict_ref.pkl','ab+') as file:
+            pkl.dump({(genome_id,sample_id):nreads},file)
+
     def __str__(self):
         return "CoPTRRefEstimate(bam_file={}, genome_id={}, sample_id={}, estimate={:.3f}, nreads={}, cov_frac={})".format(
             self.bam_file,
@@ -1018,6 +1028,7 @@ def estimate_ptrs_coptr_ref(
     grouped_coverage_map_folder,
     min_reads,
     min_cov,
+    threads,
     plot_folder=None,
     mem_limit=None,
 ):
@@ -1052,24 +1063,60 @@ def estimate_ptrs_coptr_ref(
     coptr_ref_estimates = {}
     coptr_ref = CoPTRRef(min_reads, min_cov)
 
-    for ref_id in sorted(ref_genome_ids):
-        with open(
-            os.path.join(grouped_coverage_map_folder, ref_id + ".cm.pkl"), "rb"
-        ) as f:
-            coverage_maps = load_coverage_maps(f, ref_id)
+    if threads > 1:
+        # workers for multiprocessing
+        pool = mp.Pool(threads)
+        coverage_maps = {}
 
-        coptr_ref_estimates[ref_id] = coptr_ref.estimate_ptrs(coverage_maps)
+        for i, ref_id in enumerate(sorted(ref_genome_ids)):
+            with open(
+                os.path.join(grouped_coverage_map_folder, ref_id + ".cm.pkl"), "rb"
+            ) as f:
+                coverage_maps[ref_id] = load_coverage_maps(f, ref_id)
 
-        for sample, est in zip(coverage_maps, coptr_ref_estimates[ref_id]):
-            # only plot samples with a PTR estimate
-            if plot_folder is not None and not np.isnan(est.estimate):
-                plot_fit(
-                    est,
-                    sample.read_positions,
-                    sample.length,
-                    min_reads,
-                    min_cov,
-                    plot_folder,
-                )
+            if (i % threads == 0 and i > 0) or i == len(ref_genome_ids) - 1:
+                flat_coverage_maps = [
+                    (ref_id, coverage_maps[ref_id]) for ref_id in coverage_maps
+                ]
+                flat_results = pool.map(coptr_ref._parallel_helper, flat_coverage_maps)
+                coptr_ref_estimates.update(dict(flat_results))
+
+                for ref_id in sorted(coverage_maps):
+                    for sample, est in zip(
+                        coverage_maps[ref_id], coptr_ref_estimates[ref_id]
+                    ):
+                        # only plot samples with a PTR estimate
+                        if plot_folder is not None and not np.isnan(est.estimate):
+                            plot_fit(
+                                est,
+                                sample.read_positions,
+                                sample.length,
+                                min_reads,
+                                min_cov,
+                                plot_folder,
+                            )
+
+                coverage_maps = {}
+
+    else:
+        for ref_id in sorted(ref_genome_ids):
+            with open(
+                os.path.join(grouped_coverage_map_folder, ref_id + ".cm.pkl"), "rb"
+            ) as f:
+                coverage_maps = load_coverage_maps(f, ref_id)
+
+            coptr_ref_estimates[ref_id] = coptr_ref.estimate_ptrs(coverage_maps)
+
+            for sample, est in zip(coverage_maps, coptr_ref_estimates[ref_id]):
+                # only plot samples with a PTR estimate
+                if plot_folder is not None and not np.isnan(est.estimate):
+                    plot_fit(
+                        est,
+                        sample.read_positions,
+                        sample.length,
+                        min_reads,
+                        min_cov,
+                        plot_folder,
+                    )
 
     return coptr_ref_estimates
